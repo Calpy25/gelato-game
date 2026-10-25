@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ジェラート屋さん経営ゲーム</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>🍨 ジェラテリア・ハッカ</h1>
+  <div class="status">
+    <span class="chip" id="dayChip"></span>
+    <span class="chip cash" id="cashChip"></span>
+    <label class="chip hapsel">ハプニング <select id="hap"><option value="none">なし</option><option value="some" selected>ときどき</option><option value="many">多め</option></select></label>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- 左：意思決定パネル -->
+  <section class="panel decide" id="decide">
+    <h2>📝 今月の意思決定</h2>
+
+    <div class="given">
+      <b>🔒 所与の固定費（変えられません）</b>
+      <div id="givenList"></div>
+    </div>
+
+    <div class="field staffbox">
+      <label>👥 人員体制 <b id="staffTotal"></b></label>
+      <small>固定費は重く、準変動費は月ごとに調整できます。夏のピークと冬の閑散期をどう乗り切るかがカギです。</small>
+
+      <div class="stf"><div class="stf-h"><span>🧑‍💼 社員 <em class="tag fix">固定費</em></span><b id="regVal"></b></div>
+        <input type="range" id="regular" min="2" max="8" step="1" value="2"><small id="regNote"></small></div>
+      <div class="stf"><div class="stf-h"><span>🧑‍🎓 アルバイト <em class="tag semi">準変動費</em></span><b id="baitoVal"></b></div>
+        <input type="range" id="baito" min="0" max="10" step="1" value="2"><small id="baitoNote"></small></div>
+      <div class="stf"><div class="stf-h"><span>⚡ スポット人員 <em class="tag semi">準変動費</em></span><b id="spotVal"></b></div>
+        <input type="range" id="spot" min="0" max="4" step="1" value="0"><small id="spotNote"></small></div>
+      <div class="cap" id="capNote"></div>
+    </div>
+
+    <div class="field">
+      <label>🍨 品種ごとの製造量（今月の仕込み） <em class="tag var">変動費</em></label>
+      <small>価格・原価は固定です。売れ残り（ロス）を出さない量を考えましょう。 <button class="mini" id="fitBtn">📐 予想に合わせる</button></small>
+      <div id="varList"></div>
+    </div>
+
+    <div class="field">
+      <label>📣 広報（SNS）の予算 <em class="tag semi">準変動費</em> <b id="adsVal"></b></label>
+      <input type="range" id="ads" min="0" max="800000" step="20000" value="0">
+      <small id="adsNote"></small>
+    </div>
+
+    <div class="field">
+      <button class="act wide" id="opsBtn">🔧 オペレーション改善<br><small id="opsNote"></small></button>
+    </div>
+
+    <div class="field strat">
+      <label>🎯 今月の戦略と、その理由</label>
+      <small>どんな狙いで、今月の設定にしましたか？ 狙いを決めてから営業しましょう。</small>
+      <div id="stratList"></div>
+      <div id="reasonList"></div>
+      <input type="text" id="memo" maxlength="60" placeholder="一言メモ（任意）">
+    </div>
+
+    <button class="go" id="goBtn">🍦 今月の営業開始！</button>
+  </section>
+
+  <!-- 右 -->
+  <section class="panel result">
+    <div id="planView">
+      <div id="quick"></div>
+      <div id="adscmp"></div>
+      <div id="pmap"></div>
+      <h2>🔮 今月の予想</h2>
+      <div class="conds" id="conds"></div>
+      <div id="events"></div>
+      <div id="balance"></div>
+      <div id="guide"></div>
+      <div id="forecast"></div>
+    </div>
+    <div id="resultView" hidden>
+      <h2>📊 今月の営業結果</h2>
+      <div id="report"></div>
+      <button class="go next" id="nextBtn">▶ 翌月へ</button>
+    </div>
+    <div id="finalView" hidden></div>
+
+    <h3>📈 年間の損益分岐点（累計）</h3>
+    <div id="cum"></div>
+    <h3>📊 月別の営業利益</h3>
+    <div class="hist" id="hist"></div>
+  </section>
+</main>
+<script src="game.js"></script>
+</body>
+</html>
