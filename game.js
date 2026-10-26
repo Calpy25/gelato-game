@@ -12,7 +12,7 @@ const MAX_TURN = MONTHS.length;
 const WAGE_REG = 150000, WAGE_BAITO = 120000, WAGE_SPOT = 170000, TRAIN = 20000;
 const PROD_BAITO = 0.85, PROD_NEW = 0.6;           // 戦力（社員=1.0）
 // 所与の固定費（変更不可）
-const GIVEN = [["🏠 店舗家賃", 156000], ["💡 光熱費（基本）", 65000], ["📡 保険・通信費ほか", 39000], ["🏭 マシンリース（1台）", 100000]];
+const GIVEN = [["🏠 店舗家賃", 156000], ["💡 光熱費（基本）", 65000], ["📡 保険・通信費ほか", 39000]];
 const GIVEN_TOTAL = GIVEN.reduce((a, g) => a + g[1], 0);
 // 品種：価格・原価は固定。share＝来店客のうち、その品種を選ぶ割合
 const VARIETIES = [
@@ -28,9 +28,42 @@ const AD_MAX = 800000;
 const adFactor = spend => 1 + 1.6 * (1 - Math.exp(-spend / 390000));   // 広報レバレッジ（逓減）
 const PROD_MAX = 5000;
 
+// ===== 年間方針の選択肢 =====
+const WINTER_F = 1.3;                              // 冬メニューの効果（12〜2月の需要）
+const PRODUCTS = {
+  prem: { name: "プレミアム重視", icon: "🥭", shares: { prem: 0.40, std: 0.60 }, demandF: 0.88, desc: "高単価で売る。客数は少なめ（-12%）だが、1杯の利益が大きい。繁忙期（接客が埋まる時期）に強い" },
+  bal:  { name: "バランス",       icon: "⚖️", shares: { prem: 0.30, std: 0.70 }, demandF: 1.00, desc: "プレミアムと定番を、ほどよく売る" },
+  std:  { name: "定番重視",       icon: "🍦", shares: { prem: 0.15, std: 0.85 }, demandF: 1.12, desc: "親しみやすい定番で、客数を増やす（+12%）。1杯の利益は小さい。閑散期（客が少ない時期）に強い" },
+};
+const MACHINES = {
+  used: { name: "中古マシン（年間リース）", monthly: 100000, demand: 1.00, cap: 0,  upfront: 0,       amort: 0,     desc: "月 ¥100,000（固定費）。性能は並み" },
+  new:  { name: "最新マシン（年間リース）", monthly: 230000, demand: 1.10, cap: 20, upfront: 0,       amort: 0,     desc: "月 ¥230,000（固定費）。需要+10%・接客上限+20杯/日" },
+  buy:  { name: "最新マシンを購入",         monthly: 40000,  demand: 1.05, cap: 15, upfront: 2400000, amort: 60000, desc: "年初に ¥2,400,000 を支払う（現金が大きく減る）。月は保守 ¥40,000＋償却 ¥60,000（計 ¥100,000）。需要+5%・接客上限+15杯/日" },
+};
+const SLACKS = {
+  safe: { name: "余裕を持って仕込む", f: 1.10, desc: "売り切れを避ける。ロスは増える" },
+  std:  { name: "予想どおりに仕込む", f: 1.00, desc: "予想需要に合わせる" },
+  lean: { name: "ロスを抑えて仕込む", f: 0.95, desc: "ロスを減らす。売り切れの機会損失が出やすい" },
+};
+const REGULAR_OPTS = [2, 3, 4];
+const AD_BUDGETS = [1500000, 3000000, 5000000];
+const EXTRAS = {
+  winter: { name: "❄️ 冬メニュー（焼き芋ジェラートなど）", upfront: 300000, amort: 25000, desc: "年初に ¥300,000 を投資。12〜2月の需要 +30%" },
+  ops: { name: "🔧 オペレーション改善（年初に投資）", upfront: 500000, amort: 41667, desc: "年初に ¥500,000 を投資。接客上限 +10杯/人・日、ロス-15%" },
+};
+const YEAR_REASONS = ["夏にしっかり稼ぎたい", "資金に余裕を残したい", "固定費を軽くしたい", "広報の効果を試したい", "ブランドを高めたい", "ロスを減らしたい", "ハプニングに備えたい", "まず堅実に始めたい"];
+const DEFAULT_DRAFT = { product: "bal", machine: "used", regular: 2, adBudget: 3000000, slack: "std", winter: false, ops: false, reasons: [], memo: "" };
+function buildPolicy(d) {
+  const pr = PRODUCTS[d.product], mach = MACHINES[d.machine];
+  return { ...d, label: pr.name, shares: pr.shares, demandF: pr.demandF, mach, slackF: SLACKS[d.slack].f,
+    upfront: mach.upfront + (d.winter ? EXTRAS.winter.upfront : 0) + (d.ops ? EXTRAS.ops.upfront : 0),
+    amortMonthly: mach.amort + (d.winter ? EXTRAS.winter.amort : 0) + (d.ops ? EXTRAS.ops.amort : 0) };
+}
+const shareOf = v => S.policy.shares[v.id];
+
 // ===== 状態 =====
 const S = {
-  turn: 1, cash: START_CASH, penalty: 1.0, opsLevel: 0, phase: "plan",
+  turn: 1, cash: START_CASH, penalty: 1.0, opsLevel: 0, phase: "year", adsUsed: 0, policy: buildPolicy(DEFAULT_DRAFT), draft: null,
   ops: false, cond: null, history: [], showMap: false, mapSpot: 0, showBest: false,
   regular: 2, lastBaito: 0, carry: 1, wageMul: 1, hap: "some", strategy: null, reasons: [], memo: "",
   prod: { prem: 1000, std: 2500 },
@@ -108,8 +141,8 @@ function fLabel(f) { return f >= 1.08 ? "平年より高め" : f <= 0.92 ? "平�
 
 // ===== 計算（予想も実績も同じ式） =====
 function plan() {
-  return { prod: { ...S.prod }, ads: +$("ads").value, ops: S.ops,
-    regular: +$("regular").value, baito: +$("baito").value, spot: +$("spot").value };
+  const p = { ads: +$("ads").value, ops: false, regular: S.policy.regular, baito: +$("baito").value, spot: 0 };
+  p.prod = fitProd(p); return p;
 }
 // mode: false＝予想 / true＝実績 / {weather,risks,sudden,noise,extra}＝段階ごとの試算
 function evaluate(p, c, mode) {
@@ -119,12 +152,12 @@ function evaluate(p, c, mode) {
   if (m.risks) eff = comb(eff, c.effRisk);
   if (m.sudden) eff = comb(eff, c.effSudden);
   if (m.extra) eff = comb(eff, m.extra);
-  const mm = eff.matMul, wm = S.wageMul * eff.wageMul;
+  const mm = eff.matMul, wm = S.wageMul * eff.wageMul, pol = S.policy;
   const lvl = S.opsLevel + (p.ops && S.opsLevel < OPS_MAX ? 1 : 0);
-  const raw = BASE_DEMAND * DAYS * c.idx * f * adFactor(p.ads) * S.penalty * S.carry * eff.demandF;
+  const raw = BASE_DEMAND * DAYS * c.idx * f * adFactor(p.ads) * S.penalty * S.carry * eff.demandF * pol.demandF * pol.mach.demand * (pol.winter && [12, 1, 2].includes(c.m) ? WINTER_F : 1);
   const demand = Math.round(raw * (m.noise ? c.noise : 1));
   const dv = {}; let acc = 0;
-  VARIETIES.forEach((v, i) => { dv[v.id] = i < VARIETIES.length - 1 ? Math.round(demand * v.share) : demand - acc; acc += dv[v.id]; });
+  VARIETIES.forEach((v, i) => { dv[v.id] = i < VARIETIES.length - 1 ? Math.round(demand * shareOf(v)) : demand - acc; acc += dv[v.id]; });
   // 販売：まず自分の品種、売り切れ分の一部は他品種へ
   const sv = {}, left = {}; let unmet = 0, leftSum = 0;
   VARIETIES.forEach(v => { sv[v.id] = Math.min(dv[v.id], p.prod[v.id]); unmet += dv[v.id] - sv[v.id]; left[v.id] = p.prod[v.id] - sv[v.id]; leftSum += left[v.id]; });
@@ -133,7 +166,7 @@ function evaluate(p, c, mode) {
   // 戦力と接客上限
   const retained = Math.min(p.baito, S.lastBaito), newHire = Math.max(0, p.baito - S.lastBaito);
   const power = Math.max(0, p.regular + PROD_BAITO * retained + PROD_NEW * newHire + p.spot + eff.powerDelta);
-  const cap = Math.floor(power * capPer(lvl) * DAYS);
+  const cap = Math.floor((power * capPer(lvl) + pol.mach.cap) * DAYS);
   let total = sum(sv), capped = false;
   if (total > cap) { capped = true; VARIETIES.forEach(v => { sv[v.id] = Math.floor(sv[v.id] * cap / total); }); total = sum(sv); }
   const prodTotal = sum(p.prod);
@@ -148,14 +181,14 @@ function evaluate(p, c, mode) {
     const rec = loss[v.id] * v.cost * mm * lvl * OPS_LOSS_RECOVER;
     lossRecovered += rec;
     vm[v.id] = sv[v.id] * v.price - p.prod[v.id] * (v.cost * mm + extra) + rec;
-    unit += v.share * (v.price - v.cost * mm - extra);
+    unit += shareOf(v) * (v.price - v.cost * mm - extra);
   });
   const seasonCost = prodTotal * extra;
   const varCost = matCost + seasonCost - lossRecovered;
   const margin = sales - varCost;
   // 費用の3層
   const regCost = p.regular * WAGE_REG * wm, opsCost = lvl > S.opsLevel ? OPS_COST : 0;
-  const fixedCost = GIVEN_TOTAL + regCost + opsCost + eff.extraCost;
+  const fixedCost = GIVEN_TOTAL + regCost + opsCost + eff.extraCost + pol.mach.monthly + pol.amortMonthly;
   const baitoCost = p.baito * WAGE_BAITO * wm, trainCost = newHire * TRAIN, spotCost = p.spot * WAGE_SPOT * wm;
   const semiCost = baitoCost + trainCost + spotCost + p.ads;
   const allFixed = fixedCost + semiCost;
@@ -164,7 +197,7 @@ function evaluate(p, c, mode) {
   const bepSales = marginRate > 0 ? allFixed / marginRate : Infinity;
   return { f, demand, dLo: Math.round(raw * 0.85), dHi: Math.round(raw * 1.15), dv, sv, pv: p.prod, loss, vm, cap, power,
     prod: prodTotal, sold: total, limiter, lossQty, sales, matCost, seasonCost, lossRecovered, varCost, margin,
-    regCost, opsCost, eventCost: eff.extraCost, matMul: mm, wm, fixedCost, baitoCost, trainCost, spotCost, ads: p.ads, semiCost, allFixed, staffCost,
+    regCost, opsCost, machCost: pol.mach.monthly, amort: pol.amortMonthly, machName: pol.mach.name, eventCost: eff.extraCost, matMul: mm, wm, fixedCost, baitoCost, trainCost, spotCost, ads: p.ads, semiCost, allFixed, staffCost,
     regular: p.regular, baito: p.baito, spot: p.spot, newHire, retained,
     profit: margin - allFixed, lvl, lost, unit, extra, marginRate, bepSales,
     safety: sales > 0 && isFinite(bepSales) ? (sales - bepSales) / sales : -1,
@@ -220,7 +253,7 @@ function plHTML(r) {
     L("限界利益", r.margin, "sub", r.margin < 0) +
     GIVEN.map(g => L(`　🔒 ${g[0].slice(2)}`, -g[1])).join("") +
     L(`　社員給与（${r.regular}人）`, -r.regCost) +
-    (r.opsCost ? L("　オペレーション改善投資", -r.opsCost) : "") + (r.eventCost ? L("　臨時費用（修理・冷却など）", -r.eventCost) : "") +
+    L("　マシン（" + r.machName + "）", -r.machCost) + (r.amort ? L("　償却費（年初に支払済みの投資の月割り）", -r.amort) : "") + (r.opsCost ? L("　オペレーション改善投資", -r.opsCost) : "") + (r.eventCost ? L("　臨時費用（修理・冷却など）", -r.eventCost) : "") +
     L("固定費 計", -r.fixedCost, "sub l-fix") +
     L(`　アルバイト（${r.baito}人）`, -r.baitoCost) +
     (r.trainCost ? L(`　新人の研修費（${r.newHire}人）`, -r.trainCost) : "") +
@@ -232,6 +265,7 @@ function plHTML(r) {
 
 // ===== 予想ビュー =====
 function renderPlan() {
+  $("ads").max = adCap();
   const c = S.cond, p = plan(), r = evaluate(p, c, false);
   const hot = c.idx * c.fF >= 1.45;
   const idxNote = c.idx >= 1.3 ? "繁忙期（ピーク）" : c.idx <= 0.5 ? "閑散期" : "通常期";
@@ -247,7 +281,7 @@ function renderPlan() {
     `<h3>🍨 品種別の見通し</h3>` + varTableHTML(r) +
     `<h3>🍦 何がボトルネック？（販売数 ＝ 一番低い数値）</h3>` + barsHTML(r) +
     `<h3>🧾 予想損益計算書</h3>` + plHTML(r);
-  renderEvents(p, r); renderStrategy();
+  renderEvents(p, r); renderPolicyBox();
   renderQuick(p, r); renderAdsCmp(p, r); renderMap(p);
   { const np0 = { ...p, ads: 0 }; np0.prod = fitProd(np0); const r0b = evaluate(np0, c, false);
     $("balance").innerHTML = balanceHTML(r, p.ads > 0 ? (r.margin - r0b.margin) / p.ads : 0, p.ads > 0); }
@@ -274,17 +308,24 @@ function renderPlan() {
   $("goBtn").textContent = S.strategy ? "🍦 今月の営業開始！" : "🎯 先に、今月の戦略を選んでね";
   const r0 = evaluate({ ...p, ads: 0 }, c, false);
   const gain = r.demand - r0.demand;
-  $("adsNote").innerHTML = `需要 ×${adFactor(p.ads).toFixed(2)}：来店客数 <b>+${gain.toLocaleString()}人</b>（広報なし ${r0.demand.toLocaleString()}人 → ${r.demand.toLocaleString()}人）。` +
+  $("adsNote").innerHTML = "今月使える上限 <b>" + yen(adCap()) + "</b>（年間予算の残り）。<br>" + `需要 ×${adFactor(p.ads).toFixed(2)}：来店客数 <b>+${gain.toLocaleString()}人</b>（広報なし ${r0.demand.toLocaleString()}人 → ${r.demand.toLocaleString()}人）。` +
     (p.ads > 0 ? `<br>客数1人あたり広報費 ${yen(p.ads / Math.max(gain, 1))} ／ 1人の限界利益 約${yen(r.unit)}${r.limiter === "staff" ? "　<b>⚠️ 接客上限で頭打ち</b>" : ""}` : "<br>広報を増やすと需要は大きく伸びます（使うほど効き目は薄れます）");
   const opsMax = S.opsLevel >= OPS_MAX;
   $("opsBtn").disabled = opsMax;
   $("opsBtn").classList.toggle("on", S.ops && !opsMax);
   $("opsNote").textContent = opsMax ? "最大レベルです" : `${yen(OPS_COST)}（固定費）/ 接客+10杯/人・日、ロス-15%（Lv${S.opsLevel}→${S.opsLevel + 1}）。効果は来月以降も続きます`;
 }
+function renderPolicyBox() {
+  const pol = S.policy, remain = pol.adBudget - S.adsUsed;
+  $("policyList").innerHTML = "<span>" + PRODUCTS[pol.product].icon + " " + pol.label + "</span><span>🏭 " + pol.mach.name + "</span><span>🧑‍💼 社員 " + pol.regular + "人</span><span>🥄 " + SLACKS[pol.slack].name + "</span>" +
+    (pol.winter ? "<span>❄️ 冬メニュー</span>" : "") + (pol.ops ? "<span>🔧 オペレーション改善</span>" : "") +
+    '<span class="tot">📣 広報予算 残り ' + yen(remain) + " / " + yen(pol.adBudget) + "（使用 " + Math.round(S.adsUsed / pol.adBudget * 100) + "%）</span>";
+}
 function renderHeader() {
   const mo = MONTHS[Math.min(S.turn, MAX_TURN) - 1];
   $("dayChip").textContent = `📅 ${mo.m}月（${Math.min(S.turn, MAX_TURN)} / ${MAX_TURN}か月目）`;
   $("cashChip").textContent = "💰 " + yen(S.cash);
+  if (S.phase === "year") $("dayChip").textContent = "📋 年初の方針づくり（開業前）";
   $("givenList").innerHTML = GIVEN.map(g => `<span>${g[0]} ${yen(g[1])}</span>`).join("") + `<span class="tot">計 ${yen(GIVEN_TOTAL)}/月</span>`;
 }
 function renderHist() {
@@ -318,18 +359,18 @@ function renderQuick(p, r) {
       <td>${isFinite(bq0) ? bq0.toLocaleString() : "—"}杯</td>
       <td class="hl"><b>${isFinite(bq) ? bq.toLocaleString() : "—"}杯</b><small>（1日 約${Math.ceil(day)}杯／売上 ${yen(bq * v.price)}）</small>${day > capDay ? '<br><small class="neg">⚠️ 接客上限（1日 約' + Math.round(capDay) + '杯）超え</small>' : ""}</td></tr>`;
   }).join("");
-  const avgP = VARIETIES.reduce((a, v) => a + v.share * v.price, 0), avgC = VARIETIES.reduce((a, v) => a + v.share * (v.cost * r.matMul + r.extra), 0);
+  const avgP = VARIETIES.reduce((a, v) => a + shareOf(v) * v.price, 0), avgC = VARIETIES.reduce((a, v) => a + shareOf(v) * (v.cost * r.matMul + r.extra), 0);
   const bqm = r.unit > 0 ? Math.ceil(r.allFixed / r.unit) : Infinity;
   const [a, b] = VARIETIES, ua = a.price - a.cost * r.matMul - r.extra, ub = b.price - b.cost * r.matMul - r.extra;
   $("quick").innerHTML = `<div class="quick"><h3>📌 損益分岐点の早見表（今月の固定費で、品種ごとに見ると）</h3>
     <div class="q-top"><div><span>固定費</span><b>${yen(r.fixedCost)}</b></div><div><span>＋ 準変動費</span><b>${yen(r.semiCost)}</b></div><div class="q-sum"><span>＝ 回収すべき費用</span><b>${yen(r.allFixed)}</b></div></div>
     <table class="vs vt qt"><tr><th>品種</th><th>価格</th><th>変動費<small>（原価）</small></th><th>1杯の限界利益</th><th>限界利益率</th><th>損益分岐点<small>（固定費だけ）</small></th><th>損益分岐点<small>（固定費＋準変動費）</small></th></tr>${rows}
-      <tr class="mix"><td>🍨 今の売れ筋ミックス<br><small>（${VARIETIES.map(v => v.name + Math.round(v.share * 100) + "%").join("・")}）</small></td><td>${yen(avgP)}</td><td>${yen(avgC)}</td><td class="hl"><b>${yen(r.unit)}</b></td><td>${Math.round(r.unit / avgP * 100)}%</td>
+      <tr class="mix"><td>🍨 今の売れ筋ミックス<br><small>（${VARIETIES.map(v => v.name + Math.round(shareOf(v) * 100) + "%").join("・")}）</small></td><td>${yen(avgP)}</td><td>${yen(avgC)}</td><td class="hl"><b>${yen(r.unit)}</b></td><td>${Math.round(r.unit / avgP * 100)}%</td>
       <td>${r.unit > 0 ? Math.ceil(r.fixedCost / r.unit).toLocaleString() : "—"}杯</td><td class="hl"><b>${isFinite(bqm) ? bqm.toLocaleString() : "—"}杯</b><small>（1日 約${Math.ceil(bqm / DAYS)}杯）</small></td></tr></table>
-    <div class="q-note">📘 損益分岐点の杯数 ＝ 費用 ÷ 1杯の限界利益。<b>${a.icon}${a.name}は1杯で ${yen(ua)}</b> 稼ぐので、定番（${yen(ub)}）の約 <b>${(ua / ub).toFixed(1)}倍</b>の速さで固定費を回収できます。ただし来店客の ${Math.round(a.share * 100)}% しか選びません。</div></div>`;
+    <div class="q-note">📘 損益分岐点の杯数 ＝ 費用 ÷ 1杯の限界利益。<b>${a.icon}${a.name}は1杯で ${yen(ua)}</b> 稼ぐので、定番（${yen(ub)}）の約 <b>${(ua / ub).toFixed(1)}倍</b>の速さで固定費を回収できます。ただし来店客の ${Math.round(shareOf(a) * 100)}% しか選びません。</div></div>`;
 }
 function renderAdsCmp(p, r) {
-  const levels = [...new Set([0, 100000, 200000, 400000, 800000, p.ads])].sort((x, y) => x - y);
+  const levels = [...new Set([0, 100000, 200000, 400000, 800000, p.ads])].filter(x => x <= Math.max(adCap(), p.ads)).sort((x, y) => x - y);
   const res = levels.map(ads => { const np = { ...p, ads }; np.prod = fitProd(np); return { ads, nr: evaluate(np, S.cond, false) }; });
   const base = res[0].nr;
   const rows = res.map(({ ads, nr }) => {
@@ -364,17 +405,18 @@ function balanceHTML(r, roi, hasAds) {
 const MAP_ADS = [0, 100000, 200000, 300000, 400000, 600000, 800000], MAP_BAITO = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 function mapCell(p, ads, baito, spot) { const np = { ...p, ads, baito, spot }; np.prod = fitProd(np); return evaluate(np, S.cond, false).profit; }
 function renderMap(p) {
+  const mapAds = MAP_ADS.filter(a => a <= adCap());
   const box = $("pmap");
   if (!S.showMap) { box.innerHTML = `<button class="mapbtn" id="mapToggle">🗺️ 利益マップを見る（広報 × 人員）</button>`; return; }
   const spot = S.mapSpot;
-  const cells = MAP_ADS.map(a => MAP_BAITO.map(b => mapCell(p, a, b, spot)));
+  const cells = mapAds.map(a => MAP_BAITO.map(b => mapCell(p, a, b, spot)));
   const flat = cells.flat(), mx = Math.max(...flat, 1), mn = Math.min(...flat, -1);
   let best = null; if (S.showBest) cells.forEach((row, i) => row.forEach((v, j) => { if (!best || v > best.v) best = { v, i, j }; }));
   const color = v => v >= 0 ? `hsl(140,50%,${96 - 38 * v / mx}%)` : `hsl(0,70%,${96 - 30 * v / mn}%)`;
-  const rows = cells.map((row, i) => `<tr><th>${MAP_ADS[i] === 0 ? "広報なし" : "¥" + MAP_ADS[i] / 10000 + "万"}</th>` + row.map((v, j) =>
-    `<td data-a="${MAP_ADS[i]}" data-b="${MAP_BAITO[j]}" style="background:${color(v)}" class="${p.ads === MAP_ADS[i] && p.baito === MAP_BAITO[j] && p.spot === spot ? "now" : ""}">${best && best.i === i && best.j === j ? "★" : ""}${v >= 0 ? "+" : ""}${Math.round(v / 10000)}</td>`).join("") + "</tr>").join("");
+  const rows = cells.map((row, i) => `<tr><th>${mapAds[i] === 0 ? "広報なし" : "¥" + mapAds[i] / 10000 + "万"}</th>` + row.map((v, j) =>
+    `<td data-a="${mapAds[i]}" data-b="${MAP_BAITO[j]}" style="background:${color(v)}" class="${p.ads === mapAds[i] && p.baito === MAP_BAITO[j] && p.spot === spot ? "now" : ""}">${best && best.i === i && best.j === j ? "★" : ""}${v >= 0 ? "+" : ""}${Math.round(v / 10000)}</td>`).join("") + "</tr>").join("");
   box.innerHTML = `<div class="quick"><h3>🗺️ 利益マップ（営業利益・万円）</h3>
-    <div class="map-help">縦＝広報費、横＝アルバイト人数。上のタブでスポット人員を切り替えます。<b>濃い緑ほど利益が高く、赤は赤字</b>です。マスを押すと、その設定を試せます。どちらへ動かすと良くなるか、探してみましょう。（製造量は、各マスで予想に合わせています。社員・オペレーション改善は今の設定のままです）</div>
+    <div class="map-help">縦＝広報費、横＝アルバイト人数。<b>濃い緑ほど利益が高く、赤は赤字</b>です。マスを押すと、その設定を試せます。どちらへ動かすと良くなるか、探してみましょう。（製造量は、各マスで予想に合わせています。社員・オペレーション改善は今の設定のままです）</div>
     <div class="map-tabs">スポット人員：${[0, 1, 2, 3].map(s => `<button class="mt ${s === spot ? "on" : ""}" data-s="${s}">${s}人</button>`).join("")}</div>
     <div class="map-scroll"><table class="pmap"><tr><th>広報＼バイト</th>${MAP_BAITO.map(b => `<th>${b}人</th>`).join("")}</tr>${rows}</table></div>
     <div class="map-foot">枠のついたマス＝今の設定${S.showBest ? "　★＝このタブでの最良（答え合わせ）" : ""}　<button class="mini" id="bestToggle">${S.showBest ? "★を隠す" : "★ 答え合わせ（最良のマスを見る）"}</button>　<button class="mini" id="mapToggle">マップを閉じる</button></div></div>`;
@@ -393,43 +435,30 @@ function fitProd(np) {
   const big = {}; VARIETIES.forEach(v => { big[v.id] = PROD_MAX; });
   const d = evaluate({ ...np, prod: big }, S.cond, false);
   const k = Math.min(1, d.cap / Math.max(d.demand, 1));
-  const o = {}; VARIETIES.forEach(v => { o[v.id] = Math.min(PROD_MAX, Math.ceil(d.dv[v.id] * k / 50) * 50); });
+  const o = {}; VARIETIES.forEach(v => { o[v.id] = Math.min(PROD_MAX, Math.ceil(d.dv[v.id] * k * S.policy.slackF / 50) * 50); });
   return o;
 }
+const adCap = () => Math.max(0, Math.min(AD_MAX, Math.floor((S.policy.adBudget - S.adsUsed) / 20000) * 20000));
 function candidates(p, r) {
   const list = [];
-  const add = (title, patch, why, refit = true) => {
-    const np = { ...p, ...patch };
-    if (refit) np.prod = fitProd(np);
+  const add = (title, patch, why) => {
+    const np = { ...p, ...patch }; np.prod = fitProd(np);
     const nr = evaluate(np, S.cond, false);
     list.push({ title, np, nr, why, delta: nr.profit - r.profit });
   };
-  add("📐 製造量を予想に合わせる", {}, "作りすぎはロス、足りないと機会損失。需要と接客上限に合わせます");
   [1, 2].forEach(n => { if (p.baito + n <= 10) add(`🧑‍🎓 アルバイトを ${p.baito + n}人にする`, { baito: p.baito + n }, "接客上限を上げて取りこぼしを減らします（新人は研修費がかかり、今月の戦力は低め）"); });
   [1, 2].forEach(n => { if (p.baito - n >= 0) add(`🧑‍🎓 アルバイトを ${p.baito - n}人にする`, { baito: p.baito - n }, "準変動費を減らして、損益分岐点を下げます"); });
-  if (p.spot < 4) add(`⚡ スポット人員を ${p.spot + 1}人にする`, { spot: p.spot + 1 }, "割高だが研修不要で、繁忙月の穴埋めに使えます");
-  if (p.spot > 0) add(`⚡ スポット人員を ${p.spot - 1}人にする`, { spot: p.spot - 1 }, "割高な人員を減らします");
-  [40000, 80000, 160000].forEach(s => { if (p.ads + s <= AD_MAX) add(`📣 広報を ${yen(p.ads + s)} にする`, { ads: p.ads + s }, "来店客数を増やします（準変動費）。製造量も合わせて増やします"); });
-  [40000, 80000, 160000].forEach(s => { if (p.ads - s >= 0) add(`📣 広報を ${yen(p.ads - s)} にする`, { ads: p.ads - s }, "効き目の薄れた広報費を削ります"); });
-  if (S.opsLevel < OPS_MAX) add(S.ops ? "🔧 オペレーション改善をやめる" : "🔧 オペレーション改善をする", { ops: !S.ops },
-    `接客上限UPとロス軽減。${yen(OPS_COST)}は今月の固定費ですが、効果は来月以降も続きます（今月だけ見ると不利に見えます）`);
-  VARIETIES.forEach(v => {
-    [200, -200].forEach(dv => {
-      const n = p.prod[v.id] + dv; if (n < 0 || n > PROD_MAX) return;
-      add(`${v.icon} ${v.name}の製造を ${dv > 0 ? "+" : ""}${dv}杯（${n.toLocaleString()}杯）`, { prod: { ...p.prod, [v.id]: n } },
-        dv > 0 ? `利益率${Math.round((v.price - v.cost) / v.price * 100)}%の品種。売り切れを防ぎます` : "売れ残り（ロス）を減らします", false);
-    });
-  });
+  [40000, 80000, 160000].forEach(s => { if (p.ads + s <= adCap()) add(`📣 広報を ${yen(p.ads + s)} にする`, { ads: p.ads + s }, "来店客数を増やします（準変動費）。年間予算が減ります"); });
+  [40000, 80000, 160000].forEach(s => { if (p.ads - s >= 0) add(`📣 広報を ${yen(p.ads - s)} にする`, { ads: p.ads - s }, "効き目の薄れた広報費を削ります。年間予算を残せます"); });
   return list;
 }
 function bestPlan(p) {
   let best = null;
-  for (let ads = 0; ads <= AD_MAX; ads += 80000) for (const ops of S.opsLevel < OPS_MAX ? [false, true] : [false])
-    for (let baito = 0; baito <= 10; baito++) for (let spot = 0; spot <= 2; spot++) {
-      const np = { ...p, ads, ops, baito, spot }; np.prod = fitProd(np);
-      const nr = evaluate(np, S.cond, false);
-      if (!best || nr.profit > best.nr.profit) best = { np, nr };
-    }
+  for (let ads = 0; ads <= adCap(); ads += 40000) for (let baito = 0; baito <= 10; baito++) {
+    const np = { ...p, ads, baito, spot: 0, ops: false }; np.prod = fitProd(np);
+    const nr = evaluate(np, S.cond, false);
+    if (!best || nr.profit > best.nr.profit) best = { np, nr };
+  }
   return best;
 }
 function diagnosis(r) {
@@ -469,8 +498,8 @@ function renderGuide(p, r) {
     const box = $("bestBox"); if (!box) return;
     const hard = b.nr.profit < 0 ? `<div class="g-item">⚠️ どの組み合わせでも赤字になる厳しい月です（閑散期など）。<b>赤字を最小限に抑える</b>のも立派な経営判断です。</div>` : "";
     box.innerHTML = (b.nr.profit - r.profit >= 3000 ? `<div class="g-title">🎯 まとめて見直すなら（目安）</div><div class="g-item"><div class="g-t">利益 ${yen(r.profit)} → <b>${yen(b.nr.profit)}</b></div>
-      <div class="g-m">アルバイト ${b.np.baito}人／スポット ${b.np.spot}人／広報 ${yen(b.np.ads)}${b.np.ops ? "／オペレーション改善" : ""}／製造 ${VARIETIES.map(v => `${v.icon}${b.np.prod[v.id].toLocaleString()}`).join(" ")}</div>
-      <div class="g-w">ひとつずつ動かしても良くならない時は、人員と広報と製造量をセットで動かすと黒字になることがあります。</div>
+      <div class="g-m">アルバイト ${b.np.baito}人／広報 ${yen(b.np.ads)}</div>
+      <div class="g-w">ひとつずつ動かしても良くならない時は、人員と広報をセットで動かすと黒字になることがあります。</div>
       <button class="mini apply" data-i="best">👉 この作戦を適用</button></div>` : "") + hard;
   }, 250);
 }
@@ -563,6 +592,102 @@ document.addEventListener("click", e => {
   else if (ch) { const t = ch.dataset.rs; S.reasons = S.reasons.includes(t) ? S.reasons.filter(x => x !== t) : [...S.reasons, t]; renderPlan(); }
 });
 
+// ===== 年初の方針づくり =====
+function yearEstimate(d) {
+  const save = { policy: S.policy, cond: S.cond, penalty: S.penalty, carry: S.carry, wageMul: S.wageMul, opsLevel: S.opsLevel, lastBaito: S.lastBaito, regular: S.regular, adsUsed: S.adsUsed };
+  const pol = buildPolicy(d); S.policy = pol; S.penalty = 1; S.carry = 1; S.wageMul = 1; S.opsLevel = pol.ops ? 1 : 0; S.lastBaito = 0; S.regular = pol.regular; S.adsUsed = 0;
+  const sumIdx = MONTHS.reduce((a, m) => a + m.idx, 0);
+  let cash = START_CASH - pol.upfront, min = cash, total = 0; const months = [];
+  MONTHS.forEach((mo, i) => {
+    S.cond = { turn: i + 1, m: mo.m, idx: mo.idx, trueF: 1, fF: 1, noise: 1, known: null, risks: [], sudden: null, effKnown: E0, effRisk: E0, effSudden: E0, newCarry: 1 };
+    const capAds = Math.min(AD_MAX, Math.floor(pol.adBudget * mo.idx / sumIdx / 20000) * 20000);
+    let best = null;
+    for (let ads = 0; ads <= capAds; ads += 40000) for (let baito = 0; baito <= 10; baito++) {
+      const np = { ads, ops: false, regular: pol.regular, baito, spot: 0 }; np.prod = fitProd(np);
+      const nr = evaluate(np, S.cond, false);
+      if (!best || nr.profit > best.nr.profit) best = { np, nr };
+    }
+    S.lastBaito = best.np.baito; cash += best.nr.profit + best.nr.amort; min = Math.min(min, cash); total += best.nr.profit;
+    months.push({ m: mo.m, profit: best.nr.profit, ads: best.np.ads, baito: best.np.baito });
+  });
+  Object.assign(S, save);
+  return { total, min, months, cash };
+}
+function renderYear() {
+  const d = S.draft, pol = buildPolicy(d), est = yearEstimate(d);
+  const opt = (key, val, title, desc, on) => `<button class="sc ${on ? "on" : ""}" data-yk="${key}" data-yv="${val}"><b>${title}</b><small>${desc}</small></button>`;
+  const group = (title, hint, items) => `<div class="yg"><h3>${title}</h3><div class="yhint">${hint}</div><div class="yopts">${items}</div></div>`;
+  const unitOf = k => VARIETIES.reduce((a, v) => a + PRODUCTS[k].shares[v.id] * (v.price - v.cost), 0);
+  const baseMonthly = GIVEN_TOTAL + pol.regular * WAGE_REG + pol.mach.monthly + pol.amortMonthly;
+  const mixUnit = VARIETIES.reduce((a, v) => a + pol.shares[v.id] * (v.price - v.cost), 0) * 1;
+  const bepYear = Math.ceil(baseMonthly * 12 / mixUnit);
+  const mx = Math.max(...est.months.map(x => Math.abs(x.profit)), 1);
+  const bars = est.months.map(x => `<div class="ybar" title="${x.m}月: ${yen(x.profit)}"><div class="${x.profit >= 0 ? "p" : "m"}" style="${x.profit >= 0 ? "bottom" : "top"}:50%;height:${Math.abs(x.profit) / mx * 50}%"></div><i>${x.m}</i></div>`).join("");
+  $("yearView").innerHTML = `<h2>📋 年初の方針づくり（4月・開業前）</h2>
+    <div class="yintro">今年1年の大きな方針を決めます。<b>決めたあとは、毎月変えられるのは「広報の金額」と「アルバイトの人数」だけ</b>です。夏にしっかり稼ぎ、冬を乗り切るために、じっくり考えましょう。</div>
+    ${group("🍨 商品方針", "何を売っていく年にしますか？（お客さんが選ぶ品種の割合が変わります）",
+      Object.keys(PRODUCTS).map(k => opt("product", k, `${PRODUCTS[k].icon} ${PRODUCTS[k].name}`, `${PRODUCTS[k].desc}<br>プレミアム ${Math.round(PRODUCTS[k].shares.prem * 100)}%／定番 ${Math.round(PRODUCTS[k].shares.std * 100)}%・1杯の平均利益 <b>${yen(unitOf(k))}</b>`, d.product === k)).join(""))}
+    ${group("📣 年間の広報予算", "年間の上限です。月ごとの配分は、あとで自由に決められます。使い切ると、広報はできません。",
+      AD_BUDGETS.map(v => opt("adBudget", v, yen(v), (v === AD_BUDGETS[0] ? "控えめ" : v === AD_BUDGETS[1] ? "標準" : "積極的") + "（月平均 約" + Math.round(v / 12 / 10000) + "万円）", d.adBudget === v)).join(""))}
+    ${group("🏭 設備（マシン1台・年間契約）", "年の途中では変えられません。購入は現金が先に出ていきます。",
+      Object.keys(MACHINES).map(k => opt("machine", k, MACHINES[k].name, MACHINES[k].desc, d.machine === k)).join(""))}
+    ${group("🧑‍💼 社員の人数（固定費）", "年の途中では変えられません。不足分は毎月のアルバイトで調整します。",
+      REGULAR_OPTS.map(n => opt("regular", n, `${n}人`, `月 ${yen(n * WAGE_REG)}（年 ${yen(n * WAGE_REG * 12)}）・戦力 ${n}人分`, d.regular === n)).join(""))}
+    ${group("🥄 仕込みの方針", "製造量は、毎月この方針で自動的に決まります（需要の予想と、接客上限に合わせます）。",
+      Object.keys(SLACKS).map(k => opt("slack", k, SLACKS[k].name, SLACKS[k].desc, d.slack === k)).join(""))}
+    ${group("➕ 追加の投資（なくても構いません）", "年初に現金を支払い、月ごとに償却費として計上されます。",
+      Object.keys(EXTRAS).map(k => opt(k, "toggle", EXTRAS[k].name, EXTRAS[k].desc, d[k])).join(""))}
+    <div class="yg"><h3>📝 この方針にした理由</h3><div class="yhint">年末に、振り返りの材料になります。</div>
+      <div>${YEAR_REASONS.map(t => `<button class="chip2 ${d.reasons.includes(t) ? "on" : ""}" data-yr="${t}">${t}</button>`).join("")}</div>
+      <input type="text" id="ymemo" maxlength="80" placeholder="一言メモ（任意）" value="${d.memo.replace(/"/g, "&quot;")}"></div>
+    <div class="ysum"><h3>📊 この方針の見通し</h3>
+      <div class="ysum-g">
+        <div><span>年初の支出</span><b>${yen(pol.upfront)}</b><small>年初の資金 ${yen(START_CASH - pol.upfront)}</small></div>
+        <div><span>月々の固定費（社員・マシン・所与・償却）</span><b>${yen(baseMonthly)}</b><small>年間 ${yen(baseMonthly * 12)}</small></div>
+        <div><span>年間の損益分岐点（固定費だけ）</span><b>${bepYear.toLocaleString()}杯</b><small>1日 約${Math.ceil(bepYear / (DAYS * 12))}杯</small></div>
+      </div>
+      <div class="ysum-e ${est.total >= 0 ? "ok" : "ng"}">月次の調整（広報・アルバイト）をうまくやった場合の目安：<b>年間の営業利益 ${yen(est.total)}</b>／年間の最低資金 <b>${yen(est.min)}</b>${est.min < 0 ? "　⚠️ 資金ショートの危険があります" : ""}</div>
+      <div class="ybars">${bars}</div>
+      <div class="yhint">※ ハプニング（天候リスク・突発）は入っていない目安です。実際には、運で上下します。</div>
+    </div>
+    <button class="go" id="startYear">🍦 この方針で、1年を始める！</button>`;
+}
+function startYear() {
+  S.policy = buildPolicy(S.draft); S.cash = START_CASH - S.policy.upfront; S.opsLevel = S.policy.ops ? 1 : 0; S.regular = S.policy.regular;
+  S.adsUsed = 0; S.strategy = "year"; S.cond = makeCond(1); S.phase = "plan";
+  $("ads").value = 0; $("baito").value = 2;
+  showPhase(); renderHeader();
+}
+document.addEventListener("click", e => {
+  if (S.phase !== "year") return;
+  const o = e.target.closest("[data-yk]"), ch = e.target.closest("[data-yr]"), st = e.target.closest("#startYear");
+  if (o) { const k = o.dataset.yk, v = o.dataset.yv; S.draft[k] = (k === "winter" || k === "ops") ? !S.draft[k] : (k === "regular" || k === "adBudget") ? +v : v; renderYear(); }
+  else if (ch) { const t = ch.dataset.yr; S.draft.reasons = S.draft.reasons.includes(t) ? S.draft.reasons.filter(x => x !== t) : [...S.draft.reasons, t]; renderYear(); }
+  else if (st) startYear();
+});
+document.addEventListener("input", e => { if (e.target.id === "ymemo") S.draft.memo = e.target.value; });
+function policyReviewHTML(r, p) {
+  const pol = S.policy, pc = x => Math.round(x * 100) + "%";
+  const util = r.cap > 0 ? r.demand / r.cap : 0, v0 = VARIETIES[0];
+  const premShare = r.sold ? r.sv[v0.id] / r.sold : 0, elapsed = S.turn / MAX_TURN, used = (S.adsUsed + p.ads) / pol.adBudget;
+  const li = [
+    `${PRODUCTS[pol.product].icon} 商品方針「${pol.label}」：プレミアムの販売比率 ${pc(premShare)}（想定 ${pc(shareOf(v0))}）／限界利益率 ${pc(r.marginRate)}`,
+    `📣 広報：今月 ${yen(p.ads)}。年間予算の消化 ${pc(used)}（経過 ${pc(elapsed)}）${used > elapsed + 0.15 ? " ― 前倒しで使っています。繁忙期の分は残っていますか？" : used < elapsed - 0.15 ? " ― 使い控えています。必要な月に使えていますか？" : ""}`,
+    `🏭 設備「${pol.mach.name}」：稼働率 ${pc(util)}（接客上限 ${r.cap.toLocaleString()}杯）`,
+    `🧑‍💼 人員：社員 ${pol.regular}人（固定）＋アルバイト ${p.baito}人。人件費は売上の ${pc(r.sales ? r.staffCost / r.sales : 0)}`,
+  ];
+  if (pol.winter && [12, 1, 2].includes(S.cond.m)) li.push(`❄️ 冬メニュー：今月は需要 +30% の効果が出ています（月の償却 ${yen(EXTRAS.winter.amort)}）`);
+  return `<div class="guide"><h3>📋 年間方針の振り返り</h3><div class="g-w">年初の理由：${pol.reasons.length ? pol.reasons.join("／") : "（選択なし）"}${pol.memo ? "　メモ：「" + pol.memo + "」" : ""}</div>
+    <ul>${li.map(x => `<li>${x}</li>`).join("")}</ul><div class="g-w">※ 点数ではありません。方針と実際を見比べるための材料です。</div></div>`;
+}
+function policyFinalHTML() {
+  const pol = S.policy;
+  return `<div class="guide"><h3>📋 今年の方針</h3><ul>
+    <li>${PRODUCTS[pol.product].icon} 商品方針：${pol.label}／📣 広報予算 ${yen(pol.adBudget)}（使用 ${yen(S.adsUsed)}）</li>
+    <li>🏭 ${pol.mach.name}／🧑‍💼 社員 ${pol.regular}人／🥄 ${SLACKS[pol.slack].name}${pol.winter ? "／❄️ 冬メニュー" : ""}${pol.ops ? "／🔧 オペレーション改善" : ""}</li>
+    <li>理由：${pol.reasons.length ? pol.reasons.join("／") : "（選択なし）"}${pol.memo ? "　メモ：「" + pol.memo + "」" : ""}</li></ul></div>`;
+}
+
 // ===== 営業開始 =====
 function openShop() {
   const p = plan(), c = S.cond;
@@ -571,8 +696,7 @@ function openShop() {
   const np0 = { ...p, ads: 0 }; np0.prod = fitProd(np0); const r0 = evaluate(np0, c, true);
   const roi = p.ads > 0 ? (r.margin - r0.margin) / p.ads : 0;
   const bestProfit = Math.max(bestPlan(p).nr.profit, f.profit);
-  const st = STRATEGIES.find(s => s.id === S.strategy);
-  const stratHTML = strategyReviewHTML(S.strategy, r);
+  const stratHTML = policyReviewHTML(r, p);
   S.opsLevel = r.lvl; S.regular = p.regular; S.lastBaito = p.baito;
   S.wageMul *= c.effKnown.wageMul; S.carry = c.newCarry;
   let penaltyMsg = "";
@@ -580,11 +704,11 @@ function openShop() {
     S.penalty = p.ads > 0 ? 0.85 : 0.92;
     penaltyMsg = `行列クレーム発生！${r.lost.toLocaleString()}人を取り逃がし、来月の需要が下がります`;
   } else S.penalty = Math.min(1, S.penalty + 0.05);
-  S.cash += r.profit;
+  S.cash += r.profit + r.amort; S.adsUsed += p.ads;
   const evNames = [c.known && c.known.icon + c.known.name, ...c.risks.filter(k => k.realized).map(k => k.ev.icon + k.ev.name), c.sudden && c.sudden.icon + c.sudden.name].filter(Boolean);
   S.history.push({ turn: S.turn, m: c.m, profit: r.profit, margin: r.margin, allFixed: r.allFixed, fixedCost: r.fixedCost, semiCost: r.semiCost,
     staffCost: r.staffCost, power: r.power, loss: r.lossQty, sales: r.sales, demand: r.demand,
-    strategy: st.icon + st.name, reasons: [...S.reasons], memo: S.memo, fProfit: f.profit, bestProfit, luck: r.profit - f.profit, events: evNames });
+    strategy: PRODUCTS[S.policy.product].icon + S.policy.label, ads: p.ads, baito: p.baito, reasons: [...S.policy.reasons], memo: S.policy.memo, fProfit: f.profit, bestProfit, luck: r.profit - f.profit, events: evNames });
   S.phase = "result";
   const ok = r.margin >= r.allFixed;
   $("report").innerHTML =
@@ -604,19 +728,22 @@ function openShop() {
 }
 function nextDay() {
   if (S.cash < 0 || S.turn >= MAX_TURN) return showFinal();
-  S.turn++; S.ops = false; S.showBest = false; S.strategy = null; S.reasons = []; S.memo = ""; $("memo").value = ""; S.cond = makeCond(S.turn); S.phase = "plan";
+  S.turn++; S.ops = false; S.showBest = false; S.strategy = "year"; S.cond = makeCond(S.turn); S.phase = "plan";
   showPhase(); renderHeader(); renderPlan();
 }
 function showPhase() {
+  document.querySelector("main").classList.toggle("yearmode", S.phase === "year");
+  $("yearView").hidden = S.phase !== "year";
   $("planView").hidden = S.phase !== "plan";
   $("resultView").hidden = S.phase !== "result";
   $("finalView").hidden = S.phase !== "final";
   document.querySelectorAll("#decide input,#decide button").forEach(e => { e.disabled = S.phase !== "plan"; });
-  if (S.phase === "plan") { renderPlan(); if (S.opsLevel >= OPS_MAX) $("opsBtn").disabled = true; }
+  if (S.phase === "year") renderYear();
+  if (S.phase === "plan") renderPlan();
 }
 function showFinal() {
   S.phase = "final";
-  const h = S.history, total = S.cash - START_CASH;
+  const h = S.history, total = h.reduce((a, x) => a + x.profit, 0);
   const black = h.filter(x => x.profit >= 0).length, loss = h.reduce((a, x) => a + x.loss, 0);
   const rank = S.cash < 0 ? "D" : total >= 3000000 ? "S" : total >= 2000000 ? "A" : total >= 1000000 ? "B" : total >= 0 ? "C" : "D";
   const staffActual = h.reduce((a, x) => a + x.staffCost, 0);
@@ -624,7 +751,8 @@ function showFinal() {
   const allReg = Math.ceil(peak) * WAGE_REG * h.length;      // ピークに合わせて全員を社員にした場合
   const worst = h.reduce((a, x) => (x.profit < a.profit ? x : a), h[0]), best = h.reduce((a, x) => (x.profit > a.profit ? x : a), h[0]);
   $("finalView").innerHTML = `<h2>🏆 年間の結果発表</h2>
-    <div class="verdict ${total >= 0 && S.cash >= 0 ? "ok" : "ng"}">${S.cash < 0 ? "💥 資金ショート！ 閑散期を耐えられませんでした。<br>" : ""}ランク <span class="rank">${rank}</span>　最終資金 ${yen(S.cash)}（${total >= 0 ? "+" : ""}${yen(total)}）</div>
+    <div class="verdict ${total >= 0 && S.cash >= 0 ? "ok" : "ng"}">${S.cash < 0 ? "💥 資金ショート！ 閑散期を耐えられませんでした。<br>" : ""}ランク <span class="rank">${rank}</span>　最終資金 ${yen(S.cash)}（年間の営業利益 ${yen(total)}）</div>
+    ${policyFinalHTML()}
     <div class="kpis"><div class="kpi"><span>黒字の月</span><b>${black} / ${h.length}か月</b></div><div class="kpi"><span>ロス合計</span><b>${loss.toLocaleString()}杯</b></div>
     <div class="kpi"><span>年間の営業利益</span><b>${yen(total)}</b></div></div>
     <div class="guide"><h3>👥 人員コストの比較：準変動費化の効果</h3>
@@ -633,8 +761,8 @@ function showFinal() {
       <tr><td>準変動費化による差額</td><td><b class="${allReg - staffActual >= 0 ? "pos" : "neg"}">${yen(allReg - staffActual)}</b></td></tr></table>
       <ul><li>最も良かった月：${best.m}月（${yen(best.profit)}）／最も悪かった月：${worst.m}月（${yen(worst.profit)}）</li>
       <li>固定費は売上がなくても毎月かかります。繁忙期だけ人員を足し、閑散期に絞る「準変動費化」が、年間の損益分岐点を下げます。</li></ul></div>
-    <div class="guide"><h3>📒 判断ログ（毎月の戦略・理由・結果）</h3><div class="map-scroll"><table class="vs vt qt logt"><tr><th>月</th><th>戦略</th><th>理由・メモ</th><th>予想利益</th><th>運の影響</th><th>実績</th><th>ハプニング</th></tr>
-      ${h.map(x => `<tr><td>${x.m}月</td><td>${x.strategy}</td><td class="lt">${x.reasons.join("／") || "—"}${x.memo ? "<br>「" + x.memo + "」" : ""}</td><td>${yen(x.fProfit)}</td>
+    <div class="guide"><h3>📒 判断ログ（毎月の広報・アルバイトと結果）</h3><div class="map-scroll"><table class="vs vt qt logt"><tr><th>月</th><th>広報</th><th>バイト</th><th>予想利益</th><th>運の影響</th><th>実績</th><th>ハプニング</th></tr>
+      ${h.map(x => `<tr><td>${x.m}月</td><td>${yen(x.ads)}</td><td>${x.baito}人</td><td>${yen(x.fProfit)}</td>
       <td class="${x.luck >= 0 ? "pos" : "neg"}">${(x.luck >= 0 ? "+" : "") + yen(x.luck)}</td><td><b>${yen(x.profit)}</b></td><td class="lt">${x.events.join("／") || "—"}</td></tr>`).join("")}</table></div>
       <ul><li>運の影響の合計：<b>${yen(h.reduce((a, x) => a + x.luck, 0))}</b>　／　判断の伸びしろ（最良設定との差）の合計：<b>${yen(h.reduce((a, x) => a + Math.max(0, x.bestProfit - x.fProfit), 0))}</b></li>
       <li>結果が悪かった月も、「判断」と「運」に分けて見ると、次に直すべき点が分かります。</li></ul></div>
@@ -650,5 +778,5 @@ $("goBtn").onclick = openShop;
 $("memo").addEventListener("input", e => { S.memo = e.target.value; });
 $("hap").addEventListener("change", e => { S.hap = e.target.value; if (S.phase === "plan") { S.cond = makeCond(S.turn); renderHeader(); renderPlan(); } });
 $("nextBtn").onclick = nextDay;
-S.cond = makeCond(1);
+S.draft = { ...DEFAULT_DRAFT, reasons: [] };
 renderHeader(); showPhase(); renderHist();

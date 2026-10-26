@@ -205,3 +205,26 @@ input[type=range]{width:100%;accent-color:var(--pink-d)}
 .sr{padding:6px 10px;border-radius:10px;font-size:13px;margin:6px 0}.sr.ok{background:#d9f6ec;color:#146b52}.sr.ng{background:#fff0dc;color:#8a5a00}
 .logt td.lt{text-align:left;font-size:11px;max-width:220px}
 .logt td,.logt th{text-align:right}.logt td:nth-child(2),.logt th:nth-child(2){text-align:left}
+
+/* ---- year plan ---- */
+main.yearmode > #decide, main.yearmode > .result{display:none}
+main:not(.yearmode) > #yearView{display:none}
+main.yearmode{grid-template-columns:1fr;max-width:980px}
+.yintro{background:#fffbe6;border:2px solid var(--yellow);border-radius:14px;padding:10px 14px;font-size:13px;line-height:1.7;margin-bottom:14px}
+.yg{margin:16px 0}.yg h3{margin:0 0 2px}
+.yhint{font-size:12px;color:#8a7060;margin-bottom:6px}
+.yopts{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}
+.yopts .sc{padding:10px 12px}.yopts .sc b{font-size:14px}.yopts .sc small{font-size:11px;margin-top:4px}
+#ymemo{width:100%;margin-top:8px;border:2px solid #d5e3ff;border-radius:10px;padding:6px 10px;font:inherit;font-size:13px}
+.ysum{background:#f3f8ff;border:2px solid #b9d3ff;border-radius:16px;padding:8px 16px 14px;margin:18px 0}
+.ysum-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px}
+@media(max-width:700px){.ysum-g{grid-template-columns:1fr}}
+.ysum-g div{background:#fff;border-radius:12px;padding:8px 10px;text-align:center}
+.ysum-g span{display:block;font-size:11px;color:#8a7060}.ysum-g b{font-size:18px}.ysum-g small{display:block;font-size:11px;color:#8a7060}
+.ysum-e{padding:8px 12px;border-radius:10px;font-size:13px}.ysum-e.ok{background:#d9f6ec;color:#146b52}.ysum-e.ng{background:#ffe0e0;color:#a32828}
+.ybars{display:flex;gap:3px;height:90px;margin:10px 0 22px}
+.ybar{flex:1;position:relative}.ybar div{position:absolute;left:12%;right:12%;border-radius:3px}
+.ybar .p{background:var(--mint-d)}.ybar .m{background:var(--red)}
+.ybar i{position:absolute;bottom:-16px;left:0;right:0;text-align:center;font-size:10px;font-style:normal;color:#a08070}
+.map-tabs{display:none}
+.given.policy{background:#f3f8ff}
