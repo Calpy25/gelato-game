@@ -52,14 +52,24 @@ const EXTRAS = {
   ops: { name: "🔧 オペレーション改善（年初に投資）", upfront: 500000, amort: 41667, desc: "年初に ¥500,000 を投資。接客上限 +10杯/人・日、ロス-15%" },
 };
 const YEAR_REASONS = ["夏にしっかり稼ぎたい", "資金に余裕を残したい", "固定費を軽くしたい", "広報の効果を試したい", "ブランドを高めたい", "ロスを減らしたい", "ハプニングに備えたい", "まず堅実に始めたい"];
-const DEFAULT_DRAFT = { product: "bal", machine: "used", regular: 2, adBudget: 3000000, slack: "std", winter: false, ops: false, reasons: [], memo: "" };
+const SLACKS_PREM = {
+  safe: { name: "売り切れさせない（多めに仕込む）", short: "プレミアム：売り切れ回避", f: 1.35, desc: "品切れを避ける。余った分は廃棄ロスになる" },
+  std:  { name: "予想どおりに仕込む", short: "プレミアム：予想どおり", f: 1.00, desc: "予想需要に合わせる" },
+  lean: { name: "絞って仕込む（廃棄を減らす）", short: "プレミアム：絞る", f: 0.90, desc: "廃棄を減らす。売り切れの機会損失が出やすい" },
+};
+const PREM_PRICES = [650, 750, 850], PREM_COST = { 650: 195, 750: 215, 850: 240 };
+const STD_PRICES = [350, 400, 450], STD_COST = { 350: 148, 400: 160, 450: 185 };
+const DEFAULT_DRAFT = { product: "bal", premPrice: 650, stdPrice: 400, slackPrem: "std", slackStd: "std", machine: "used", regular: 2, adBudget: 3000000, winter: false, ops: false, reasons: [], memo: "" };
 function buildPolicy(d) {
   const pr = PRODUCTS[d.product], mach = MACHINES[d.machine];
-  return { ...d, label: pr.name, shares: pr.shares, demandF: pr.demandF, mach, slackF: SLACKS[d.slack].f,
+  const wp = pr.shares.prem * Math.pow(650 / d.premPrice, 1.3), ws = pr.shares.std * Math.pow(400 / d.stdPrice, 2.0), wsum = wp + ws;
+  return { ...d, label: pr.name, shares: pr.shares, eShares: { prem: wp / wsum, std: ws / wsum }, priceF: wsum, demandF: pr.demandF, mach,
+    premCost: PREM_COST[d.premPrice], stdCost: STD_COST[d.stdPrice], slackF: { prem: SLACKS_PREM[d.slackPrem].f, std: SLACKS[d.slackStd].f },
     upfront: mach.upfront + (d.winter ? EXTRAS.winter.upfront : 0) + (d.ops ? EXTRAS.ops.upfront : 0),
     amortMonthly: mach.amort + (d.winter ? EXTRAS.winter.amort : 0) + (d.ops ? EXTRAS.ops.amort : 0) };
 }
-const shareOf = v => S.policy.shares[v.id];
+const shareOf = v => S.policy.eShares[v.id];
+function setPrices(pol) { VARIETIES[0].price = pol.premPrice; VARIETIES[0].cost = pol.premCost; VARIETIES[1].price = pol.stdPrice; VARIETIES[1].cost = pol.stdCost; }
 
 // ===== 状態 =====
 const S = {
@@ -154,7 +164,7 @@ function evaluate(p, c, mode) {
   if (m.extra) eff = comb(eff, m.extra);
   const mm = eff.matMul, wm = S.wageMul * eff.wageMul, pol = S.policy;
   const lvl = S.opsLevel + (p.ops && S.opsLevel < OPS_MAX ? 1 : 0);
-  const raw = BASE_DEMAND * DAYS * c.idx * f * adFactor(p.ads) * S.penalty * S.carry * eff.demandF * pol.demandF * pol.mach.demand * (pol.winter && [12, 1, 2].includes(c.m) ? WINTER_F : 1);
+  const raw = BASE_DEMAND * DAYS * c.idx * f * adFactor(p.ads) * S.penalty * S.carry * eff.demandF * pol.demandF * pol.priceF * pol.mach.demand * (pol.winter && [12, 1, 2].includes(c.m) ? WINTER_F : 1);
   const demand = Math.round(raw * (m.noise ? c.noise : 1));
   const dv = {}; let acc = 0;
   VARIETIES.forEach((v, i) => { dv[v.id] = i < VARIETIES.length - 1 ? Math.round(demand * shareOf(v)) : demand - acc; acc += dv[v.id]; });
@@ -173,11 +183,11 @@ function evaluate(p, c, mode) {
   const lost = Math.max(0, demand - total);
   const limiter = capped ? "staff" : lost > demand * 0.03 ? "stock" : "demand";
   const extra = c.idx * f >= 1.45 ? HOT_EXTRA : 0;
-  let sales = 0, matCost = 0, lossRecovered = 0, lossQty = 0, unit = 0;
+  let sales = 0, matCost = 0, lossRecovered = 0, lossQty = 0, lossAmt = 0, unit = 0;
   const loss = {}, vm = {};
   VARIETIES.forEach(v => {
     sales += sv[v.id] * v.price; matCost += p.prod[v.id] * v.cost * mm;
-    loss[v.id] = p.prod[v.id] - sv[v.id]; lossQty += loss[v.id];
+    loss[v.id] = p.prod[v.id] - sv[v.id]; lossQty += loss[v.id]; lossAmt += loss[v.id] * v.cost * mm;
     const rec = loss[v.id] * v.cost * mm * lvl * OPS_LOSS_RECOVER;
     lossRecovered += rec;
     vm[v.id] = sv[v.id] * v.price - p.prod[v.id] * (v.cost * mm + extra) + rec;
@@ -196,7 +206,7 @@ function evaluate(p, c, mode) {
   const marginRate = sales > 0 ? margin / sales : 0;
   const bepSales = marginRate > 0 ? allFixed / marginRate : Infinity;
   return { f, demand, dLo: Math.round(raw * 0.85), dHi: Math.round(raw * 1.15), dv, sv, pv: p.prod, loss, vm, cap, power,
-    prod: prodTotal, sold: total, limiter, lossQty, sales, matCost, seasonCost, lossRecovered, varCost, margin,
+    prod: prodTotal, sold: total, limiter, lossQty, lossAmt, sales, matCost, seasonCost, lossRecovered, varCost, margin,
     regCost, opsCost, machCost: pol.mach.monthly, amort: pol.amortMonthly, machName: pol.mach.name, eventCost: eff.extraCost, matMul: mm, wm, fixedCost, baitoCost, trainCost, spotCost, ads: p.ads, semiCost, allFixed, staffCost,
     regular: p.regular, baito: p.baito, spot: p.spot, newHire, retained,
     profit: margin - allFixed, lvl, lost, unit, extra, marginRate, bepSales,
@@ -249,7 +259,7 @@ function plHTML(r) {
     L(`　材料費（製造 ${r.prod.toLocaleString()}杯）`, -r.matCost) +
     (r.seasonCost ? L("　猛暑の保冷剤コスト", -r.seasonCost) : "") +
     (r.lossRecovered ? L("　ロス軽減効果（業務改善）", r.lossRecovered) : "") +
-    L(`変動費 計（うちロス ${r.lossQty.toLocaleString()}杯）`, -r.varCost, "sub l-var") +
+    L(`変動費 計（うちロス ${r.lossQty.toLocaleString()}杯・${yen(r.lossAmt)}）`, -r.varCost, "sub l-var") +
     L("限界利益", r.margin, "sub", r.margin < 0) +
     GIVEN.map(g => L(`　🔒 ${g[0].slice(2)}`, -g[1])).join("") +
     L(`　社員給与（${r.regular}人）`, -r.regCost) +
@@ -317,7 +327,7 @@ function renderPlan() {
 }
 function renderPolicyBox() {
   const pol = S.policy, remain = pol.adBudget - S.adsUsed;
-  $("policyList").innerHTML = "<span>" + PRODUCTS[pol.product].icon + " " + pol.label + "</span><span>🏭 " + pol.mach.name + "</span><span>🧑‍💼 社員 " + pol.regular + "人</span><span>🥄 " + SLACKS[pol.slack].name + "</span>" +
+  $("policyList").innerHTML = "<span>" + PRODUCTS[pol.product].icon + " " + pol.label + "</span><span>🏭 " + pol.mach.name + "</span><span>🧑‍💼 社員 " + pol.regular + "人</span><span>💴 プレミアム" + yen(pol.premPrice) + "／定番" + yen(pol.stdPrice) + "</span><span>🥄 " + SLACKS_PREM[pol.slackPrem].short + "</span>" +
     (pol.winter ? "<span>❄️ 冬メニュー</span>" : "") + (pol.ops ? "<span>🔧 オペレーション改善</span>" : "") +
     '<span class="tot">📣 広報予算 残り ' + yen(remain) + " / " + yen(pol.adBudget) + "（使用 " + Math.round(S.adsUsed / pol.adBudget * 100) + "%）</span>";
 }
@@ -435,7 +445,7 @@ function fitProd(np) {
   const big = {}; VARIETIES.forEach(v => { big[v.id] = PROD_MAX; });
   const d = evaluate({ ...np, prod: big }, S.cond, false);
   const k = Math.min(1, d.cap / Math.max(d.demand, 1));
-  const o = {}; VARIETIES.forEach(v => { o[v.id] = Math.min(PROD_MAX, Math.ceil(d.dv[v.id] * k * S.policy.slackF / 50) * 50); });
+  const o = {}; VARIETIES.forEach(v => { o[v.id] = Math.min(PROD_MAX, Math.ceil(d.dv[v.id] * k * S.policy.slackF[v.id] / 50) * 50); });
   return o;
 }
 const adCap = () => Math.max(0, Math.min(AD_MAX, Math.floor((S.policy.adBudget - S.adsUsed) / 20000) * 20000));
@@ -595,9 +605,9 @@ document.addEventListener("click", e => {
 // ===== 年初の方針づくり =====
 function yearEstimate(d) {
   const save = { policy: S.policy, cond: S.cond, penalty: S.penalty, carry: S.carry, wageMul: S.wageMul, opsLevel: S.opsLevel, lastBaito: S.lastBaito, regular: S.regular, adsUsed: S.adsUsed };
-  const pol = buildPolicy(d); S.policy = pol; S.penalty = 1; S.carry = 1; S.wageMul = 1; S.opsLevel = pol.ops ? 1 : 0; S.lastBaito = 0; S.regular = pol.regular; S.adsUsed = 0;
+  const pol = buildPolicy(d); S.policy = pol; setPrices(pol); S.penalty = 1; S.carry = 1; S.wageMul = 1; S.opsLevel = pol.ops ? 1 : 0; S.lastBaito = 0; S.regular = pol.regular; S.adsUsed = 0;
   const sumIdx = MONTHS.reduce((a, m) => a + m.idx, 0);
-  let cash = START_CASH - pol.upfront, min = cash, total = 0; const months = [];
+  let cash = START_CASH - pol.upfront, min = cash, total = 0, waste = 0; const months = [];
   MONTHS.forEach((mo, i) => {
     S.cond = { turn: i + 1, m: mo.m, idx: mo.idx, trueF: 1, fF: 1, noise: 1, known: null, risks: [], sudden: null, effKnown: E0, effRisk: E0, effSudden: E0, newCarry: 1 };
     const capAds = Math.min(AD_MAX, Math.floor(pol.adBudget * mo.idx / sumIdx / 20000) * 20000);
@@ -607,34 +617,44 @@ function yearEstimate(d) {
       const nr = evaluate(np, S.cond, false);
       if (!best || nr.profit > best.nr.profit) best = { np, nr };
     }
-    S.lastBaito = best.np.baito; cash += best.nr.profit + best.nr.amort; min = Math.min(min, cash); total += best.nr.profit;
+    S.lastBaito = best.np.baito; cash += best.nr.profit + best.nr.amort; min = Math.min(min, cash); total += best.nr.profit; waste += best.nr.lossAmt;
     months.push({ m: mo.m, profit: best.nr.profit, ads: best.np.ads, baito: best.np.baito });
   });
-  Object.assign(S, save);
-  return { total, min, months, cash };
+  Object.assign(S, save); setPrices(save.policy);
+  return { total, min, months, cash, waste };
 }
 function renderYear() {
   const d = S.draft, pol = buildPolicy(d), est = yearEstimate(d);
   const opt = (key, val, title, desc, on) => `<button class="sc ${on ? "on" : ""}" data-yk="${key}" data-yv="${val}"><b>${title}</b><small>${desc}</small></button>`;
   const group = (title, hint, items) => `<div class="yg"><h3>${title}</h3><div class="yhint">${hint}</div><div class="yopts">${items}</div></div>`;
-  const unitOf = k => VARIETIES.reduce((a, v) => a + PRODUCTS[k].shares[v.id] * (v.price - v.cost), 0);
+  const unitOf = k => PRODUCTS[k].shares.prem * (d.premPrice - PREM_COST[d.premPrice]) + PRODUCTS[k].shares.std * (d.stdPrice - STD_COST[d.stdPrice]);
   const baseMonthly = GIVEN_TOTAL + pol.regular * WAGE_REG + pol.mach.monthly + pol.amortMonthly;
-  const mixUnit = VARIETIES.reduce((a, v) => a + pol.shares[v.id] * (v.price - v.cost), 0) * 1;
+  const mixUnit = pol.eShares.prem * (pol.premPrice - pol.premCost) + pol.eShares.std * (pol.stdPrice - pol.stdCost);
   const bepYear = Math.ceil(baseMonthly * 12 / mixUnit);
   const mx = Math.max(...est.months.map(x => Math.abs(x.profit)), 1);
   const bars = est.months.map(x => `<div class="ybar" title="${x.m}月: ${yen(x.profit)}"><div class="${x.profit >= 0 ? "p" : "m"}" style="${x.profit >= 0 ? "bottom" : "top"}:50%;height:${Math.abs(x.profit) / mx * 50}%"></div><i>${x.m}</i></div>`).join("");
+  const priceOpt = (key, price, cost, ref, e, name) => {
+    const f = Math.pow(ref / price, e);
+    return opt(key, price, `${name} ${yen(price)}`, `原価 ${yen(cost)}・1杯の利益 <b>${yen(price - cost)}</b><br>この品種を選ぶ客の数：${f >= 1 ? "+" : ""}${Math.round((f - 1) * 100)}%（${yen(ref)}比）`, d[key] === price);
+  };
   $("yearView").innerHTML = `<h2>📋 年初の方針づくり（4月・開業前）</h2>
     <div class="yintro">今年1年の大きな方針を決めます。<b>決めたあとは、毎月変えられるのは「広報の金額」と「アルバイトの人数」だけ</b>です。夏にしっかり稼ぎ、冬を乗り切るために、じっくり考えましょう。</div>
     ${group("🍨 商品方針", "何を売っていく年にしますか？（お客さんが選ぶ品種の割合が変わります）",
       Object.keys(PRODUCTS).map(k => opt("product", k, `${PRODUCTS[k].icon} ${PRODUCTS[k].name}`, `${PRODUCTS[k].desc}<br>プレミアム ${Math.round(PRODUCTS[k].shares.prem * 100)}%／定番 ${Math.round(PRODUCTS[k].shares.std * 100)}%・1杯の平均利益 <b>${yen(unitOf(k))}</b>`, d.product === k)).join(""))}
+    ${group("🥭 プレミアムの価格帯", "高くするほど1杯の利益は増えますが、選ぶお客さんは減ります（高い価格帯は、良い材料を使うぶん原価も上がります）。",
+      PREM_PRICES.map(p => priceOpt("premPrice", p, PREM_COST[p], 650, 1.3, "プレミアム")).join(""))}
+    ${group("🍦 定番の価格帯", "安くすると客数が増え、高くすると1杯の利益が増えます。",
+      STD_PRICES.map(p => priceOpt("stdPrice", p, STD_COST[p], 400, 2.0, "定番")).join(""))}
+    ${group("🥄 プレミアムの仕込み方針", "プレミアムは単価が高いので、売り切れは大きな機会損失です。その分、余った分は廃棄になります。",
+      Object.keys(SLACKS_PREM).map(k => opt("slackPrem", k, SLACKS_PREM[k].name, SLACKS_PREM[k].desc, d.slackPrem === k)).join(""))}
+    ${group("🥄 定番の仕込み方針", "毎月の製造量は、これらの方針で自動的に決まります（需要の予想と、接客上限に合わせます）。",
+      Object.keys(SLACKS).map(k => opt("slackStd", k, SLACKS[k].name, SLACKS[k].desc, d.slackStd === k)).join(""))}
     ${group("📣 年間の広報予算", "年間の上限です。月ごとの配分は、あとで自由に決められます。使い切ると、広報はできません。",
       AD_BUDGETS.map(v => opt("adBudget", v, yen(v), (v === AD_BUDGETS[0] ? "控えめ" : v === AD_BUDGETS[1] ? "標準" : "積極的") + "（月平均 約" + Math.round(v / 12 / 10000) + "万円）", d.adBudget === v)).join(""))}
     ${group("🏭 設備（マシン1台・年間契約）", "年の途中では変えられません。購入は現金が先に出ていきます。",
       Object.keys(MACHINES).map(k => opt("machine", k, MACHINES[k].name, MACHINES[k].desc, d.machine === k)).join(""))}
     ${group("🧑‍💼 社員の人数（固定費）", "年の途中では変えられません。不足分は毎月のアルバイトで調整します。",
       REGULAR_OPTS.map(n => opt("regular", n, `${n}人`, `月 ${yen(n * WAGE_REG)}（年 ${yen(n * WAGE_REG * 12)}）・戦力 ${n}人分`, d.regular === n)).join(""))}
-    ${group("🥄 仕込みの方針", "製造量は、毎月この方針で自動的に決まります（需要の予想と、接客上限に合わせます）。",
-      Object.keys(SLACKS).map(k => opt("slack", k, SLACKS[k].name, SLACKS[k].desc, d.slack === k)).join(""))}
     ${group("➕ 追加の投資（なくても構いません）", "年初に現金を支払い、月ごとに償却費として計上されます。",
       Object.keys(EXTRAS).map(k => opt(k, "toggle", EXTRAS[k].name, EXTRAS[k].desc, d[k])).join(""))}
     <div class="yg"><h3>📝 この方針にした理由</h3><div class="yhint">年末に、振り返りの材料になります。</div>
@@ -646,14 +666,14 @@ function renderYear() {
         <div><span>月々の固定費（社員・マシン・所与・償却）</span><b>${yen(baseMonthly)}</b><small>年間 ${yen(baseMonthly * 12)}</small></div>
         <div><span>年間の損益分岐点（固定費だけ）</span><b>${bepYear.toLocaleString()}杯</b><small>1日 約${Math.ceil(bepYear / (DAYS * 12))}杯</small></div>
       </div>
-      <div class="ysum-e ${est.total >= 0 ? "ok" : "ng"}">月次の調整（広報・アルバイト）をうまくやった場合の目安：<b>年間の営業利益 ${yen(est.total)}</b>／年間の最低資金 <b>${yen(est.min)}</b>${est.min < 0 ? "　⚠️ 資金ショートの危険があります" : ""}</div>
+      <div class="ysum-e ${est.total >= 0 ? "ok" : "ng"}">月次の調整（広報・アルバイト）をうまくやった場合の目安：<b>年間の営業利益 ${yen(est.total)}</b>／年間の最低資金 <b>${yen(est.min)}</b>${est.min < 0 ? "　⚠️ 資金ショートの危険があります" : ""}<br>想定の廃棄ロス：<b>${yen(est.waste)}</b>（年間・材料費ベース）</div>
       <div class="ybars">${bars}</div>
       <div class="yhint">※ ハプニング（天候リスク・突発）は入っていない目安です。実際には、運で上下します。</div>
     </div>
     <button class="go" id="startYear">🍦 この方針で、1年を始める！</button>`;
 }
 function startYear() {
-  S.policy = buildPolicy(S.draft); S.cash = START_CASH - S.policy.upfront; S.opsLevel = S.policy.ops ? 1 : 0; S.regular = S.policy.regular;
+  S.policy = buildPolicy(S.draft); setPrices(S.policy); S.cash = START_CASH - S.policy.upfront; S.opsLevel = S.policy.ops ? 1 : 0; S.regular = S.policy.regular;
   S.adsUsed = 0; S.strategy = "year"; S.cond = makeCond(1); S.phase = "plan";
   $("ads").value = 0; $("baito").value = 2;
   showPhase(); renderHeader();
@@ -661,7 +681,7 @@ function startYear() {
 document.addEventListener("click", e => {
   if (S.phase !== "year") return;
   const o = e.target.closest("[data-yk]"), ch = e.target.closest("[data-yr]"), st = e.target.closest("#startYear");
-  if (o) { const k = o.dataset.yk, v = o.dataset.yv; S.draft[k] = (k === "winter" || k === "ops") ? !S.draft[k] : (k === "regular" || k === "adBudget") ? +v : v; renderYear(); }
+  if (o) { const k = o.dataset.yk, v = o.dataset.yv; S.draft[k] = (k === "winter" || k === "ops") ? !S.draft[k] : (["regular", "adBudget", "premPrice", "stdPrice"].includes(k)) ? +v : v; renderYear(); }
   else if (ch) { const t = ch.dataset.yr; S.draft.reasons = S.draft.reasons.includes(t) ? S.draft.reasons.filter(x => x !== t) : [...S.draft.reasons, t]; renderYear(); }
   else if (st) startYear();
 });
@@ -676,6 +696,7 @@ function policyReviewHTML(r, p) {
     `🏭 設備「${pol.mach.name}」：稼働率 ${pc(util)}（接客上限 ${r.cap.toLocaleString()}杯）`,
     `🧑‍💼 人員：社員 ${pol.regular}人（固定）＋アルバイト ${p.baito}人。人件費は売上の ${pc(r.sales ? r.staffCost / r.sales : 0)}`,
   ];
+  { const pr = VARIETIES[0]; li.push(`🥭 プレミアム（${yen(pr.price)}）：需要 ${r.dv[pr.id].toLocaleString()}／製造 ${r.pv[pr.id].toLocaleString()}／販売 ${r.sv[pr.id].toLocaleString()} → ${r.pv[pr.id] <= r.dv[pr.id] ? "売り切れ（機会損失の可能性）" : "余り " + r.loss[pr.id].toLocaleString() + "杯（廃棄 " + yen(r.loss[pr.id] * pr.cost * r.matMul) + "）"}`); }
   if (pol.winter && [12, 1, 2].includes(S.cond.m)) li.push(`❄️ 冬メニュー：今月は需要 +30% の効果が出ています（月の償却 ${yen(EXTRAS.winter.amort)}）`);
   return `<div class="guide"><h3>📋 年間方針の振り返り</h3><div class="g-w">年初の理由：${pol.reasons.length ? pol.reasons.join("／") : "（選択なし）"}${pol.memo ? "　メモ：「" + pol.memo + "」" : ""}</div>
     <ul>${li.map(x => `<li>${x}</li>`).join("")}</ul><div class="g-w">※ 点数ではありません。方針と実際を見比べるための材料です。</div></div>`;
@@ -684,7 +705,7 @@ function policyFinalHTML() {
   const pol = S.policy;
   return `<div class="guide"><h3>📋 今年の方針</h3><ul>
     <li>${PRODUCTS[pol.product].icon} 商品方針：${pol.label}／📣 広報予算 ${yen(pol.adBudget)}（使用 ${yen(S.adsUsed)}）</li>
-    <li>🏭 ${pol.mach.name}／🧑‍💼 社員 ${pol.regular}人／🥄 ${SLACKS[pol.slack].name}${pol.winter ? "／❄️ 冬メニュー" : ""}${pol.ops ? "／🔧 オペレーション改善" : ""}</li>
+    <li>🏭 ${pol.mach.name}／🧑‍💼 社員 ${pol.regular}人／💴 プレミアム${yen(pol.premPrice)}・定番${yen(pol.stdPrice)}／🥄 プレミアム：${SLACKS_PREM[pol.slackPrem].name}・定番：${SLACKS[pol.slackStd].name}${pol.winter ? "／❄️ 冬メニュー" : ""}${pol.ops ? "／🔧 オペレーション改善" : ""}</li>
     <li>理由：${pol.reasons.length ? pol.reasons.join("／") : "（選択なし）"}${pol.memo ? "　メモ：「" + pol.memo + "」" : ""}</li></ul></div>`;
 }
 
@@ -779,4 +800,5 @@ $("memo").addEventListener("input", e => { S.memo = e.target.value; });
 $("hap").addEventListener("change", e => { S.hap = e.target.value; if (S.phase === "plan") { S.cond = makeCond(S.turn); renderHeader(); renderPlan(); } });
 $("nextBtn").onclick = nextDay;
 S.draft = { ...DEFAULT_DRAFT, reasons: [] };
+setPrices(S.policy);
 renderHeader(); showPhase(); renderHist();
